@@ -1,0 +1,12 @@
+h5py
+pyodim
+unravel
+arm_pyart
+csu_radartools
+phido @ git+https://github.com/jordanbrook/phido.git
+numpy
+pandas
+xarray
+cftime
+numba
+Cython
