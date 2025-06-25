@@ -208,3 +208,5 @@ __marimo__/
 
 *.pbs
 *.pbs.*
+.vscode/settings.json
+gen pbs.ipynb
