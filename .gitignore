@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Cython build artifacts
+oceanpol_kit/echo_steiner.c
+
 # C extensions
 *.so
 
