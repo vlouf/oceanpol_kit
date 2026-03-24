@@ -5,60 +5,6 @@ import numpy as np
 from csu_radartools.csu_fhc import csu_fhc_summer
 
 
-# def hid_beta(x_arr, a, b, m):
-#     """Beta function calculator"""
-#     return 1.0 / (1.0 + (((x_arr - m) / a) ** 2) ** b)
-
-
-# @cache
-# def get_weights_hid():
-#     weights = {"DZ": 1.5, "DR": 0.8, "KD": 1.0, "RH": 0.8, "T": 0.4}
-#     sets = beta_functions.get_mbf_sets_summer(True, plot_flag=False, band="C")
-#     one = ["DZ", "DR", "KD", "RH", "T"]
-#     two = ["Zh_set", "Zdr_set", "Kdp_set", "rho_set", "T_set"]
-#     coeffs = {}
-#     for i in range(len(one)):
-#         coeffs[one[i]] = sets[two[i]]
-
-#     return weights, coeffs
-
-
-# def compute_hid(dbz, zdr, kdp, rhohv, temperature):
-#     # HID types:           Species #:
-#     # -------------------------------
-#     # Unclassified             0
-#     # Drizzle                  1
-#     # Rain                     2
-#     # Ice Crystals             3
-#     # Aggregates               4
-#     # Wet Snow                 5
-#     # Vertical Ice             6
-#     # Low-Density Graupel      7
-#     # High-Density Graupel     8
-#     # Hail                     9
-#     # Big Drops                10
-#     weights, coeffs = get_weights_hid()
-
-#     data = {}
-#     data["DZ"] = dbz
-#     data["DR"] = zdr
-#     data["KD"] = kdp
-#     data["RH"] = rhohv
-#     data["T"] = temperature
-
-#     hid = np.zeros((10, *dbz.shape))
-#     for i in range(10):
-#         for k, v in data.items():
-#             params = coeffs[k]
-#             a = params["a"][i]
-#             b = params["b"][i]
-#             m = params["m"][i]
-#             hid[i, :, :] += weights[k] * hid_beta(v, a, b, m)
-
-#     score = np.argmax(hid, axis=0)
-#     return score.astype(np.int16)
-
-
 def compute_hid(dbz, zdr, kdp, rhohv, temperature):
     hid = csu_fhc_summer(
         use_temp=True,
@@ -79,25 +25,7 @@ def compute_hid(dbz, zdr, kdp, rhohv, temperature):
     return hid
 
 
-def get_dsd_estimate(dbz: np.ndarray, zdr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Estimate the drop size distribution (DSD) parameters from reflectivity
-    (DBZ) and differential reflectivity (ZDR).
-
-    Parameters
-    ----------
-    dbz : np.ndarray
-        A 2D array containing the reflectivity values.
-    zdr : np.ndarray
-        A 2D array containing the differential reflectivity values.
-
-    Returns
-    -------
-    nw, d0: Tuple[np.ndarray, np.ndarray]
-        A tuple containing:
-        - nw: A 2D array of the estimated normalized intercept parameter.
-        - d0: A 2D array of the estimated median volume diameter.
-    """
+def get_dsd_estimate(dbz: np.ndarray, zdr: np.ndarray, temperature: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     d0 = np.zeros_like(zdr)
     pos = (-0.5 <= zdr) & (zdr < 1.25)
     tmp = 0.0203 * zdr**4 - 0.1488 * zdr**3 + 0.2209 * zdr**2 + 0.5571 * zdr + 0.801
@@ -108,7 +36,13 @@ def get_dsd_estimate(dbz: np.ndarray, zdr: np.ndarray) -> Tuple[np.ndarray, np.n
     d0[pos] = tmp[pos]
 
     nw = 10 ** (dbz / 10) / (0.056 * d0**7.319)
-    return np.log10(nw), d0
+    nw = np.log10(nw)
+
+    # Only valid for positive temperatures (liquid drops)
+    nw[temperature < 0] = np.nan
+    d0[temperature < 0] = np.nan
+
+    return nw, d0
 
 
 def get_rainfall_estimate(

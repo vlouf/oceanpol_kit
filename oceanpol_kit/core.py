@@ -461,7 +461,7 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
         zdr_clean = correct_zdr(zdr + zdr_offset, snr)
         zdr_clean[np.isnan(dbz_clean)] = np.nan
 
-        nw, d0 = hydro.get_dsd_estimate(dbz_clean, zdr_clean)
+        nw, d0 = hydro.get_dsd_estimate(dbz_clean, zdr_clean, temps)
         snowfall = hydro.get_snowfall_estimate(dbz_clean, kdp, temps)
         rainfall = hydro.get_rainfall_estimate(dbz_clean, zdr_clean, kdp, temps, southern_ocean)
         scores = hydro.compute_hid(dbz_clean, zdr_clean, kdp, rhohv, temps)
