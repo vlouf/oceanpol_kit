@@ -12,7 +12,6 @@ steiner_conv_strat
 """
 
 import numpy as np
-from . import echo_steiner
 
 
 def steiner_conv_strat(
@@ -78,7 +77,7 @@ def steiner_conv_strat(
     Characterization of Three-Dimensional Storm Structure from Operational
     Radar and Rain Gauge Data. J. Appl. Meteor., 34, 1978-2007.
     """
-
+    from .echo_steiner import classify
     # Get fill value
     if fill_value is None:
         fill_value = -9999.0
@@ -103,7 +102,7 @@ def steiner_conv_strat(
     ze = np.ma.filled(ze, fill_value).astype(np.float64)
 
     # Call Fortran routine
-    eclass = echo_steiner.classify(
+    eclass = classify(
         ze,
         x,
         y,

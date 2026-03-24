@@ -417,6 +417,8 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
     """
     st = time.time()
     print("Running UNRAVEL.")
+    radarlist, hfile = pyodim.read_write_odim(odim_file, read_write=True, lazy_load=False)
+    
     unfolded_vel = unravel.unravel_3D_pyodim(
         odim_file, vel_name="VRAD", condition=("SQI", "lower", 0.3), read_write=False, output_vel_name="VRADDH"
     )
@@ -424,7 +426,7 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
 
     mt = time.time()
     print(f"UNRAVEL done. Processing file {odim_file}.")
-    radarlist, hfile = pyodim.read_write_odim(odim_file, read_write=True, lazy_load=False)
+    
 
     radar = radarlist[0]
     date = pd.Timestamp(radar.time.values[0])
