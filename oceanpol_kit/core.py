@@ -19,6 +19,7 @@ differential reflectivity, drop size distribution, hydrometeor classification, a
     get_precip_mask
     get_phidp
     speckle_filter
+    despeckle_mask
     write_hvar_dset
     process_oceanpol
 """
@@ -188,22 +189,67 @@ def get_hydrometeor_mask(dbz: np.ndarray, phidp: np.ndarray, rhohv: np.ndarray) 
     return pos
 
 
+@njit(cache=True)
+def despeckle_mask(mask: np.ndarray, min_neighbours: int = 2) -> np.ndarray:
+    """
+    Remove isolated True gates from a boolean keep-mask.
+
+    A gate is retained only if at least ``min_neighbours`` of its 8 immediate
+    neighbours (in azimuth/range) are also True. This strips the salt-and-pepper
+    speckle that survives a pointwise threshold without eroding contiguous echo.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        2D boolean array (True = keep).
+    min_neighbours : int, optional
+        Minimum number of True neighbours required to retain a gate (default 2).
+
+    Returns
+    -------
+    np.ndarray
+        Despeckled boolean array.
+    """
+    ny, nx = mask.shape
+    out = np.zeros((ny, nx), dtype=np.bool_)
+    for y in range(ny):
+        for x in range(nx):
+            if not mask[y, x]:
+                continue
+            count = 0
+            for dy in range(-1, 2):
+                for dx in range(-1, 2):
+                    if dy == 0 and dx == 0:
+                        continue
+                    yy = y + dy
+                    xx = x + dx
+                    if 0 <= yy < ny and 0 <= xx < nx and mask[yy, xx]:
+                        count += 1
+            if count >= min_neighbours:
+                out[y, x] = True
+    return out
+
+
 def get_velocity_mask(
     vel: np.ndarray,
     sqi: Optional[np.ndarray] = None,
+    refl: Optional[np.ndarray] = None,
     sqi_min: float = 0.4,
     texture_max: Optional[float] = None,
     texture_win: int = 5,
+    despeckle: bool = True,
+    min_neighbours: int = 2,
 ) -> np.ndarray:
     """
     Build a permissive "keep" mask for Doppler velocity that separates coherent
     echo (including weak clear-air returns) from incoherent receiver noise.
 
-    The discriminator is coherence, not amplitude: receiver noise has near-zero
-    normalized coherent power (SQI) and a random, high-texture velocity field,
-    whereas genuine echo - even weak clear-air Bragg/insect returns at low SNR -
-    is coherent. Reflectivity, SNR and RHOHV thresholds are deliberately not
-    used here so that clear-air velocity is preserved.
+    The discriminator is coherence and signal presence, not signal strength.
+    Receiver noise has near-zero normalized coherent power (SQI), a random
+    high-texture velocity field, and no total power (TH is NaN). SNR and RHOHV
+    thresholds are deliberately avoided so that clear-air velocity is preserved;
+    total-power presence is used only as a detection gate (no power -> noise),
+    which still retains clear air because clear air has measurable total power.
 
     Parameters
     ----------
@@ -212,6 +258,9 @@ def get_velocity_mask(
     sqi : np.ndarray, optional
         Normalized coherent power / signal quality index. If given, gates with
         SQI < sqi_min are rejected (primary discriminator).
+    refl : np.ndarray, optional
+        Total power (TH). If given, gates where it is non-finite are rejected:
+        no total power means no target, so the velocity is receiver noise.
     sqi_min : float, optional
         Minimum SQI to keep a gate (default 0.4).
     texture_max : float, optional
@@ -221,6 +270,10 @@ def get_velocity_mask(
         no SQI is available.
     texture_win : int, optional
         Range window length for the texture estimate (default 5).
+    despeckle : bool, optional
+        If True (default), drop isolated surviving gates (see despeckle_mask).
+    min_neighbours : int, optional
+        Neighbour count for the despeckle step (default 2).
 
     Returns
     -------
@@ -230,6 +283,10 @@ def get_velocity_mask(
     vel = np.asarray(vel)
     good = np.isfinite(vel)
 
+    if refl is not None:
+        # No total power -> no target: the velocity there is receiver noise.
+        good = good & np.isfinite(np.asarray(refl))
+
     if sqi is not None:
         good = good & (np.asarray(sqi) >= sqi_min)
 
@@ -237,6 +294,9 @@ def get_velocity_mask(
     if use_texture is not None:
         texture = area_std(np.ascontiguousarray(vel, dtype="float64"), texture_win)
         good = good & (texture <= use_texture)
+
+    if despeckle:
+        good = despeckle_mask(np.ascontiguousarray(good), min_neighbours)
 
     return good
 
@@ -542,7 +602,8 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
         for sweep in radarlist:
             good_vel = get_velocity_mask(
                 sweep[vel_name].values,
-                sweep[sqi_name].values if sqi_name else None,
+                sqi=sweep[sqi_name].values if sqi_name else None,
+                refl=sweep[fields["TH"]].values,
             )
             sweep[vel_name].values[~good_vel] = np.nan
 
