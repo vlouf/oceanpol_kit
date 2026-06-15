@@ -23,7 +23,6 @@ differential reflectivity, drop size distribution, hydrometeor classification, a
     process_file
 """
 
-import glob
 import time
 from typing import List, Tuple
 
@@ -39,6 +38,7 @@ from scipy import interpolate
 from phido import phidp_to_kdp
 from . import hydro
 from . import atten
+from . import temperature
 
 
 # Canonical field name -> ordered list of accepted ODIM aliases.
@@ -314,55 +314,6 @@ def speckle_filter(data: np.ndarray, mask: np.ndarray, min_dbz: float = -10, min
     return copy
 
 
-def read_era5_temperature(date: pd.Timestamp, longitude: float, latitude: float) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Extract the temperature profile from ERA5 data for a given date, longitude, and latitude.
-
-    Parameters
-    ----------
-    date : pd.Timestamp
-        Date for extraction.
-    longitude : float
-        Radar longitude.
-    latitude : float
-        Radar latitude.
-
-    Returns
-    -------
-    Tuple[np.ndarray, np.ndarray]
-        A tuple containing:
-        - z: A 1D array of heights in meters.
-        - temperature: A 1D array of temperatures in Kelvin.
-    """
-    # Generate filename.
-    era5_root = "/g/data/rt52/era5/pressure-levels/reanalysis/"
-    # Build file paths
-    month_str = date.month
-    year_str = date.year
-    pattern = f"{era5_root}/t/{year_str}/t_era5_oper_pl_{year_str}{month_str:02}*.nc"
-    matches = glob.glob(pattern)
-    if not matches:
-        raise FileNotFoundError(f"No ERA5 temperature file matching: {pattern}")
-    era5_file = matches[0]
-
-    # Get temperature. Use a context manager so the file handle is released —
-    # this runs inside a long-lived multiprocessing batch where leaks add up.
-    with xr.open_dataset(era5_file) as dset:
-        nset = dset.sel(longitude=longitude, latitude=latitude, time=date, method="nearest")
-        temp_profile = nset.t.values
-        level = nset.level.values
-    geo_h_profile = -2494.3 / 0.218 * np.log(level / 1013.15)
-    zmin = geo_h_profile.min()
-    temp_ground = temp_profile[np.argmin(geo_h_profile)] + 0.0065 * zmin
-
-    # Extrapolate sea level temperature.
-    geo_h_profile = np.append(geo_h_profile, 0)
-    temp_profile = np.append(temp_profile, temp_ground)
-
-    # interp1d (in get_temperature) requires monotonically increasing x.
-    order = np.argsort(geo_h_profile)
-    return geo_h_profile[order], temp_profile[order]
-
 
 def write_hvar_dset(
     hfile: h5py.File,
@@ -515,6 +466,10 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
         lat = radar.attrs["latitude"]
         southern_ocean = lat < -40
 
+        geo_h_profile, temp_profile = temperature.get_volume_temperature_profile(
+            date, lat, lon, radarlist, fields
+        )
+
         for radar in radarlist:
             dataset_idx = int(radar.attrs["id"].strip("dataset"))
 
@@ -526,7 +481,7 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
             snr = radar[fields["SNR"]].values
             vraddh = unravel_vel[radar.attrs["id"]]
 
-            temps = get_temperature(date, lat, lon, radar.z.values)
+            temps = temperature.interp_temperature(geo_h_profile, temp_profile, radar.z.values)
             mask = get_hydrometeor_mask(dbz, phidp, rhohv)
 
             refl = np.ma.masked_where(mask, radar[fields["TH"]].values).copy().filled(np.nan)
