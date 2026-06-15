@@ -2,8 +2,6 @@
 requires = [
     "setuptools >= 70.0",
     "wheel",
-    "cython >= 3.0.8",
-    "numpy >= 1.21",          # for headers during build
 ]
 build-backend = "setuptools.build_meta"
 
@@ -45,10 +43,6 @@ dev = [
 
 [tool.setuptools]
 packages.find = {where = ["."], include = ["oceanpol_kit*"]}
-package-data = {"oceanpol_kit" = ["*.pxd", "*.pxi", "*.h"]}
 
 [tool.setuptools.dynamic]
 version = {attr = "oceanpol_kit.__version__"}
-
-[tool.cython.cythonize]
-language-level = "3str"
