@@ -1,3 +1,27 @@
+"""
+Temperature profiles for OceanPOL radar processing.
+
+Retrieves the vertical temperature profile from ERA5/ERA5T reanalysis and, when
+reanalysis is unavailable, derives a standard-atmosphere profile anchored on the
+radar-detected bright band (melting layer). Profiles are returned as
+(height [m], temperature [K]) and interpolated onto the radar gate heights.
+
+@title: oceanpol_kit
+@author: Valentin Louf
+@email: valentin.louf@bom.gov.au
+@institution: Bureau of Meteorology
+@date: 15/06/2026
+
+.. autosummary::
+    :toctree: generated/
+
+    find_era5_temperature_file
+    read_era5_temperature
+    standard_temperature_profile
+    detect_brightband_height
+    get_volume_temperature_profile
+    interp_temperature
+"""
 
 import glob
 from typing import List, Optional, Tuple
