@@ -11,16 +11,16 @@ differential reflectivity, drop size distribution, hydrometeor classification, a
 .. autosummary::
     :toctree: generated/
 
+    resolve_fields
     area_std
     correct_zdr
-    get_dsd_estimate
     get_hydrometeor_mask
+    get_velocity_mask
+    get_precip_mask
     get_phidp
-    get_temperature
     speckle_filter
-    read_era5_temperature
     write_hvar_dset
-    process_file
+    process_oceanpol
 """
 
 import time
@@ -34,7 +34,6 @@ import pandas as pd
 import xarray as xr
 
 from numba import njit
-from scipy import interpolate
 from phido import phidp_to_kdp
 from . import hydro
 from . import atten
@@ -189,8 +188,107 @@ def get_hydrometeor_mask(dbz: np.ndarray, phidp: np.ndarray, rhohv: np.ndarray) 
     return pos
 
 
+def get_velocity_mask(
+    vel: np.ndarray,
+    sqi: Optional[np.ndarray] = None,
+    sqi_min: float = 0.4,
+    texture_max: Optional[float] = None,
+    texture_win: int = 5,
+) -> np.ndarray:
+    """
+    Build a permissive "keep" mask for Doppler velocity that separates coherent
+    echo (including weak clear-air returns) from incoherent receiver noise.
+
+    The discriminator is coherence, not amplitude: receiver noise has near-zero
+    normalized coherent power (SQI) and a random, high-texture velocity field,
+    whereas genuine echo - even weak clear-air Bragg/insect returns at low SNR -
+    is coherent. Reflectivity, SNR and RHOHV thresholds are deliberately not
+    used here so that clear-air velocity is preserved.
+
+    Parameters
+    ----------
+    vel : np.ndarray
+        Raw (folded) Doppler velocity.
+    sqi : np.ndarray, optional
+        Normalized coherent power / signal quality index. If given, gates with
+        SQI < sqi_min are rejected (primary discriminator).
+    sqi_min : float, optional
+        Minimum SQI to keep a gate (default 0.4).
+    texture_max : float, optional
+        If set, also reject gates whose local velocity texture (windowed
+        standard deviation, m s-1) exceeds this value. Off by default to avoid
+        trimming aliasing fold lines in real echo; used automatically (6.0) if
+        no SQI is available.
+    texture_win : int, optional
+        Range window length for the texture estimate (default 5).
+
+    Returns
+    -------
+    np.ndarray
+        Boolean array, True where the velocity gate should be kept.
+    """
+    vel = np.asarray(vel)
+    good = np.isfinite(vel)
+
+    if sqi is not None:
+        good = good & (np.asarray(sqi) >= sqi_min)
+
+    use_texture = texture_max if texture_max is not None else (6.0 if sqi is None else None)
+    if use_texture is not None:
+        texture = area_std(np.ascontiguousarray(vel, dtype="float64"), texture_win)
+        good = good & (texture <= use_texture)
+
+    return good
+
+
+def get_precip_mask(
+    rhohv: np.ndarray,
+    snr: np.ndarray,
+    dbz: np.ndarray,
+    rho_min: float = 0.8,
+    snr_min: float = 3.0,
+) -> np.ndarray:
+    """
+    Build a strict "keep" mask of genuine precipitation gates for the phase and
+    retrieval products (PHIDP/KDP, rain, snow, DSD, HID).
+
+    Unlike the velocity mask, phase is only physical in precipitation, so this
+    is intentionally conservative: high correlation coefficient, adequate
+    signal-to-noise and finite reflectivity. Applying it before integrating
+    PHIDP prevents KDP noise from accumulating along the ray.
+
+    Parameters
+    ----------
+    rhohv : np.ndarray
+        Correlation coefficient.
+    snr : np.ndarray
+        Signal-to-noise ratio (dB).
+    dbz : np.ndarray
+        (Cleaned) reflectivity; only finite values are kept.
+    rho_min : float, optional
+        Minimum RHOHV to keep a gate (default 0.8).
+    snr_min : float, optional
+        Minimum SNR in dB to keep a gate (default 3.0).
+
+    Returns
+    -------
+    np.ndarray
+        Boolean array, True where the gate is genuine precipitation.
+    """
+    return (
+        (np.asarray(rhohv) >= rho_min)
+        & (np.asarray(snr) >= snr_min)
+        & np.isfinite(np.asarray(dbz))
+    )
+
+
 def get_phidp(
-    r: np.ndarray, phidp: np.ndarray, refl: np.ndarray, temperature: np.ndarray, window: List[int] = [3, 7]
+    r: np.ndarray,
+    phidp: np.ndarray,
+    refl: np.ndarray,
+    temperature: np.ndarray,
+    precip: Optional[np.ndarray] = None,
+    window: List[int] = [3, 7],
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Calculate the corrected differential phase (PHIDP) and specific
@@ -206,6 +304,10 @@ def get_phidp(
         A 2D array containing the reflectivity values.
     temperature : np.ndarray
         A 2D array containing the temperature values.
+    precip : np.ndarray, optional
+        Boolean precipitation mask (see get_precip_mask). Where False, KDP is
+        not integrated and the outputs are set to NaN. If None, no gating is
+        applied.
     window : List[int], optional
         A list containing the window sizes for KDP calculation (default is [3, 7]).
 
@@ -223,35 +325,19 @@ def get_phidp(
     kdp = phidp_to_kdp(phidp, dr, window=window, factor=factor, complex=True)
     kdp[(kdp < 0) & (refl < 40) & (temperature >= 0)] = 0
 
+    if precip is not None:
+        # Restrict phase to genuine precipitation: outside it KDP is set to 0 so
+        # the cumulative integration below does not accumulate noise along the
+        # ray (the cause of the radial PHIDP streaks over clear air).
+        kdp = np.where(precip, kdp, 0.0)
+
     phidp_corr = 2 * dr * np.cumsum(kdp, 1)
 
+    if precip is not None:
+        kdp = np.where(precip, kdp, np.nan)
+        phidp_corr = np.where(precip, phidp_corr, np.nan)
+
     return phidp_corr, kdp
-
-
-def get_temperature(date: pd.Timestamp, lat: float, lon: float, gates_z: np.ndarray) -> np.ndarray:
-    """
-    Retrieve the temperature profile for a given date, latitude, and longitude.
-
-    Parameters
-    ----------
-    date : str
-        The date for which to retrieve the temperature profile.
-    lat : float
-        The latitude of the location.
-    lon : float
-        The longitude of the location.
-    gates_z : np.ndarray
-        A 1D array containing the gate heights.
-
-    Returns
-    -------
-    fld np.ndarray
-        A 1D array containing the temperature profile at the specified gate heights.
-    """
-    geo_h_profile, temp_profile = read_era5_temperature(date, lon, lat)
-    f_interp = interpolate.interp1d(geo_h_profile, temp_profile, bounds_error=False, fill_value=9999)
-    fld = np.ma.masked_equal(f_interp(gates_z), 9999) - 273.15
-    return fld
 
 
 @njit(cache=True)
@@ -449,11 +535,22 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
 
         condition = (sqi_name, "lower", 0.3) if sqi_name else None
 
+        # Censor incoherent (noise) velocity gates before dealiasing. UNRAVEL
+        # then only processes coherent echo: far faster on near-empty volumes
+        # and free of the random-noise artefacts it would otherwise dealias.
+        # Coherent clear-air returns (high SQI) are preserved.
+        for sweep in radarlist:
+            good_vel = get_velocity_mask(
+                sweep[vel_name].values,
+                sweep[sqi_name].values if sqi_name else None,
+            )
+            sweep[vel_name].values[~good_vel] = np.nan
+
         unfolded_vel = unravel.unravel_3D_pyodim(
-            radarlist,                # pass the loaded data, not the path
+            radarlist,
             vel_name=vel_name,
             condition=condition,
-            read_write=False,         # required for the list path — it raises if True
+            read_write=False,
             output_vel_name="VRADDH",
         )
         unravel_vel = {r.attrs["id"]: r.VRADDH for r in unfolded_vel}
@@ -489,7 +586,8 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
             dbz_clean = np.ma.masked_invalid(dbz_clean)
 
             phidp = np.ma.masked_where(np.isnan(dbz_clean), radar[fields["PHIDP"]])
-            phidp_corr, kdp = get_phidp(r, phidp, refl, temps)
+            precip = get_precip_mask(rhohv, snr, np.ma.filled(dbz_clean, np.nan))
+            phidp_corr, kdp = get_phidp(r, phidp, refl, temps, precip=precip)
 
             pia = atten.correct_attenuation(r, dbz_clean, phidp_corr, temps)
             dbz_clean2 = dbz_clean + pia
