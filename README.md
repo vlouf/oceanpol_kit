@@ -23,12 +23,6 @@ cd oceanpol_kit
 pip install .
 ```
 
-Or install using the provided setup.py:
-
-```sh
-pip install .
-```
-
 ## Usage
 
 The main processing function is `process_oceanpol`, which processes an ODIM HDF5 radar file and writes cleaned and derived products back to the file.
