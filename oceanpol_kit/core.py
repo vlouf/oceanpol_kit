@@ -418,12 +418,22 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
     st = time.time()
     print("Running UNRAVEL.")
     radarlist, hfile = pyodim.read_write_odim(odim_file, read_write=True, lazy_load=False)
-    
+
+    sqi_name = next((s for s in ("SQI", "SQIH") if all(s in r for r in radarlist)), None)
+    vel_name = next((s for s in ("VRAD", "VRADH") if all(s in r for r in radarlist)), None)
+    if vel_name is None:
+        raise KeyError(f"Velocity not in {odim_file}")
+
+    condition = (sqi_name, "lower", 0.3) if sqi_name else None
+
     unfolded_vel = unravel.unravel_3D_pyodim(
-        odim_file, vel_name="VRAD", condition=("SQI", "lower", 0.3), read_write=False, output_vel_name="VRADDH"
+        radarlist,                # pass the loaded data, not the path
+        vel_name=vel_name,
+        condition=condition,
+        read_write=False,         # required for the list path — it raises if True
+        output_vel_name="VRADDH",
     )
     unravel_vel = {r.attrs["id"]: r.VRADDH for r in unfolded_vel}
-
     mt = time.time()
     print(f"UNRAVEL done. Processing file {odim_file}.")
     
