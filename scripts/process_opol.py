@@ -1,6 +1,7 @@
 """
 Process OceanPOL radar data for a given voyage.
-Applies QC, attenuation correction, DSD retrieval, and gridding.
+Applies QC, attenuation correction, and DSD retrieval. Gridding is done
+separately by an external tool.
 
 Usage:
     python process_opol.py -v IN2023_V06 [-j 16]
@@ -23,6 +24,8 @@ from multiprocessing import Pool
 
 import numpy as np
 import pandas as pd
+
+import oceanpol_kit
 
 
 # =====================================================================
@@ -96,12 +99,11 @@ def get_calib_offset(date: pd.Timestamp) -> Tuple[float, float]:
 # =====================================================================
 # File list
 # =====================================================================
-def get_flist(voyage: str) -> List[Tuple[str, str, str]]:
+def get_flist(voyage: str) -> List[Tuple[str, str]]:
     """
-    Build the list of (src_hdf, dst_h5, dst_nc) tuples for all unprocessed files.
+    Build the list of (src_hdf, dst_h5) tuples for all unprocessed files.
     src_hdf : original read-only file on gdata/hj10
     dst_h5  : writable copy on scratch (input to process_oceanpol)
-    dst_nc  : gridded output on scratch
     """
     pattern = os.path.join(SOURCE_ROOT, voyage, "hdf5", "**", "*PPIVol*.hdf")
     src_files = sorted(glob.glob(pattern, recursive=True))
@@ -116,15 +118,13 @@ def get_flist(voyage: str) -> List[Tuple[str, str, str]]:
         stem = src_path.stem
 
         dst_h5 = Path(DESTINATION_ROOT, voyage, "hdf5", date_dir, stem).with_suffix(".h5")
-        dst_nc = Path(DESTINATION_ROOT, voyage, "grid", date_dir, stem).with_suffix(".nc")
 
-        if dst_h5.exists() and dst_nc.exists():
+        if dst_h5.exists():
             continue
 
         dst_h5.parent.mkdir(parents=True, exist_ok=True)
-        dst_nc.parent.mkdir(parents=True, exist_ok=True)
 
-        flist.append((str(src), str(dst_h5), str(dst_nc)))
+        flist.append((str(src), str(dst_h5)))
 
     return flist
 
@@ -132,34 +132,47 @@ def get_flist(voyage: str) -> List[Tuple[str, str, str]]:
 # =====================================================================
 # Processing
 # =====================================================================
-def process_file(src: str, dst_h5: str, dst_nc: str) -> Optional[str]:
+def process_file(src: str, dst_h5: str) -> Optional[str]:
     """
-    Copy src to dst_h5, run QC + gridding, return dst_nc on success.
+    Process src into dst_h5 atomically.
+
+    The work is done on a temporary copy (dst_h5 + ".tmp") and only renamed to
+    the final dst_h5 once processing has fully succeeded. dst_h5 therefore only
+    ever exists as a complete, valid file: a crash partway through (e.g. an
+    UNRAVEL failure) leaves no partial output that a later run would mistake for
+    "already done".
     """
-    if Path(dst_h5).exists() and Path(dst_nc).exists():
-        return dst_nc
+    if Path(dst_h5).exists():
+        return dst_h5
 
     date = pd.Timestamp(Path(src).stem.split("-")[2])  # e.g. 20231019 from filename
     calib_dbz, calib_zdr = get_calib_offset(date)
 
-    shutil.copyfile(src, dst_h5)
-
-    oceanpol_kit.process_oceanpol(dst_h5, cal_offset=calib_dbz, zdr_offset=calib_zdr)
-    oceanpol_kit.grid_opol(dst_h5, dst_nc)
-
-    if not Path(dst_nc).exists():
-        raise FileNotFoundError(f"Gridded output not created: {dst_nc}")
-
-    return dst_nc
-
-
-def process_file_safe(args: Tuple[str, str, str]) -> Optional[str]:
-    """Multiprocessing wrapper — catches all exceptions and logs them."""
-    src, dst_h5, dst_nc = args
+    tmp_h5 = Path(dst_h5).with_name(Path(dst_h5).name + ".tmp")
     try:
-        result = process_file(src, dst_h5, dst_nc)
+        shutil.copyfile(src, tmp_h5)
+        oceanpol_kit.process_oceanpol(str(tmp_h5), cal_offset=calib_dbz, zdr_offset=calib_zdr)
+        os.replace(tmp_h5, dst_h5)  # atomic rename on the same filesystem
+    except BaseException:
+        Path(tmp_h5).unlink(missing_ok=True)
+        raise
+
+    return dst_h5
+
+
+def process_file_safe(args: Tuple[str, str]) -> Optional[str]:
+    """Multiprocessing wrapper — catches all exceptions and logs them."""
+    src, dst_h5 = args
+    try:
+        result = process_file(src, dst_h5)
         return result
     except Exception:
+        # Remove the partial/corrupt output so it isn't mistaken for a
+        # completed file on the next run (dst_h5 existence is the only marker).
+        try:
+            Path(dst_h5).unlink(missing_ok=True)
+        except OSError:
+            pass
         # Write traceback to a sidecar .err file next to the output
         err_file = Path(dst_h5).with_suffix(".err")
         with open(err_file, "w") as f:
@@ -220,8 +233,6 @@ def main(voyage: str, nproc: int) -> None:
 
 
 if __name__ == "__main__":
-    import oceanpol_kit
-
     parser = argparse.ArgumentParser(description="Process OceanPOL radar data for a voyage.")
     parser.add_argument("-v", "--voyage", type=str, required=True, help="Voyage ID e.g. IN2023_V06")
     parser.add_argument("-j", "--ncpu", type=int, default=16, help="Number of parallel workers")
