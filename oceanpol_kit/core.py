@@ -23,7 +23,6 @@ differential reflectivity, drop size distribution, hydrometeor classification, a
     process_file
 """
 
-import os
 import glob
 import time
 from typing import List, Tuple
@@ -35,14 +34,81 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from numba import jit
+from numba import njit
 from scipy import interpolate
 from phido import phidp_to_kdp
 from . import hydro
 from . import atten
 
 
-@jit
+# Canonical field name -> ordered list of accepted ODIM aliases.
+# The radar variable names changed over the OceanPOL archive (e.g. single-pol
+# style "SNR"/"VRAD"/"WRAD" vs dual-pol style "SNRH"/"VRADH"/"WRADH"), so fields
+# are resolved by trying each alias in order. Add new aliases here as needed.
+FIELD_ALIASES = {
+    "DBZH": ["DBZH"],
+    "TH": ["TH"],
+    "RHOHV": ["RHOHV", "RHOHVH"],
+    "ZDR": ["ZDR"],
+    "PHIDP": ["PHIDP", "PHIDPH"],
+    "SNR": ["SNR", "SNRH"],
+    "VRAD": ["VRAD", "VRADH"],
+    "WRAD": ["WRAD", "WRADH"],
+    "SQI": ["SQI", "SQIH"],
+}
+
+# Fields without which the file cannot be processed.
+REQUIRED_FIELDS = ["DBZH", "TH", "RHOHV", "ZDR", "PHIDP", "SNR", "VRAD"]
+
+
+def resolve_fields(radarlist: List["xr.Dataset"], aliases: dict = FIELD_ALIASES) -> dict:
+    """
+    Resolve canonical field names to the actual variable names present in the
+    radar volume, accounting for naming conventions that changed over the
+    archive.
+
+    A canonical name is only resolved to an alias if that alias is present in
+    *every* sweep of the volume, so the same variable name is used consistently
+    across the whole file.
+
+    Parameters
+    ----------
+    radarlist : list of xr.Dataset
+        The list of per-sweep datasets returned by pyodim.
+    aliases : dict, optional
+        Mapping of canonical name -> ordered list of accepted aliases
+        (default is FIELD_ALIASES).
+
+    Returns
+    -------
+    dict
+        Mapping of canonical name -> actual variable name (or None if no alias
+        is present in all sweeps).
+
+    Raises
+    ------
+    KeyError
+        If any field listed in REQUIRED_FIELDS cannot be resolved.
+    """
+    resolved = {}
+    for canonical, candidates in aliases.items():
+        resolved[canonical] = next(
+            (name for name in candidates if all(name in r for r in radarlist)), None
+        )
+
+    missing = [c for c in REQUIRED_FIELDS if resolved.get(c) is None]
+    if missing:
+        available = sorted({v for r in radarlist for v in r.data_vars})
+        raise KeyError(
+            f"Required field(s) {missing} not found. "
+            f"Available variables: {available}. "
+            f"Add the correct alias to FIELD_ALIASES."
+        )
+
+    return resolved
+
+
+@njit(cache=True)
 def area_std(rawphi: np.ndarray, winlen: int = 10) -> np.ndarray:
     """
     Calculate the standard deviation of a sliding window over a 2D array.
@@ -188,7 +254,7 @@ def get_temperature(date: pd.Timestamp, lat: float, lon: float, gates_z: np.ndar
     return fld
 
 
-@jit
+@njit(cache=True)
 def speckle_filter(data: np.ndarray, mask: np.ndarray, min_dbz: float = -10, min_neighbours: int = 3) -> np.ndarray:
     """
     Apply a speckle filter to radar data to remove noise.
@@ -245,7 +311,7 @@ def speckle_filter(data: np.ndarray, mask: np.ndarray, min_dbz: float = -10, min
 
             if count >= min_neighbours:
                 copy[y][x] = data[y][x]
-    return data
+    return copy
 
 
 def read_era5_temperature(date: pd.Timestamp, longitude: float, latitude: float) -> Tuple[np.ndarray, np.ndarray]:
@@ -273,16 +339,18 @@ def read_era5_temperature(date: pd.Timestamp, longitude: float, latitude: float)
     # Build file paths
     month_str = date.month
     year_str = date.year
-    era5_file = glob.glob(f"{era5_root}/t/{year_str}/t_era5_oper_pl_{year_str}{month_str:02}*.nc")[0]
+    pattern = f"{era5_root}/t/{year_str}/t_era5_oper_pl_{year_str}{month_str:02}*.nc"
+    matches = glob.glob(pattern)
+    if not matches:
+        raise FileNotFoundError(f"No ERA5 temperature file matching: {pattern}")
+    era5_file = matches[0]
 
-    if not os.path.isfile(era5_file):
-        raise FileNotFoundError(f"{era5_file} not found.")
-
-    # Get temperature
-    dset = xr.open_dataset(era5_file)
-    nset = dset.sel(longitude=longitude, latitude=latitude, time=date, method="nearest")
-    temp_profile = nset.t.values
-    level = nset.level.values
+    # Get temperature. Use a context manager so the file handle is released —
+    # this runs inside a long-lived multiprocessing batch where leaks add up.
+    with xr.open_dataset(era5_file) as dset:
+        nset = dset.sel(longitude=longitude, latitude=latitude, time=date, method="nearest")
+        temp_profile = nset.t.values
+        level = nset.level.values
     geo_h_profile = -2494.3 / 0.218 * np.log(level / 1013.15)
     zmin = geo_h_profile.min()
     temp_ground = temp_profile[np.argmin(geo_h_profile)] + 0.0065 * zmin
@@ -291,7 +359,9 @@ def read_era5_temperature(date: pd.Timestamp, longitude: float, latitude: float)
     geo_h_profile = np.append(geo_h_profile, 0)
     temp_profile = np.append(temp_profile, temp_ground)
 
-    return geo_h_profile, temp_profile
+    # interp1d (in get_temperature) requires monotonically increasing x.
+    order = np.argsort(geo_h_profile)
+    return geo_h_profile[order], temp_profile[order]
 
 
 def write_hvar_dset(
@@ -407,9 +477,9 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
     odim_file : str
         The path to the ODIM file to process.
     cal_offset : float, optional
-        The calibration offset for reflectivity (default is -0.7).
+        The calibration offset for reflectivity (default is 0.7).
     zdr_offset : float, optional
-        The offset for differential reflectivity (default is -0.7).
+        The offset for differential reflectivity (default is 0.7).
 
     Returns
     -------
@@ -419,91 +489,94 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
     print("Running UNRAVEL.")
     radarlist, hfile = pyodim.read_write_odim(odim_file, read_write=True, lazy_load=False)
 
-    sqi_name = next((s for s in ("SQI", "SQIH") if all(s in r for r in radarlist)), None)
-    vel_name = next((s for s in ("VRAD", "VRADH") if all(s in r for r in radarlist)), None)
-    if vel_name is None:
-        raise KeyError(f"Velocity not in {odim_file}")
+    try:
+        # Resolve field names once for the whole volume (raises if a required
+        # field is missing in any sweep).
+        fields = resolve_fields(radarlist)
+        sqi_name = fields["SQI"]
+        vel_name = fields["VRAD"]
 
-    condition = (sqi_name, "lower", 0.3) if sqi_name else None
+        condition = (sqi_name, "lower", 0.3) if sqi_name else None
 
-    unfolded_vel = unravel.unravel_3D_pyodim(
-        radarlist,                # pass the loaded data, not the path
-        vel_name=vel_name,
-        condition=condition,
-        read_write=False,         # required for the list path — it raises if True
-        output_vel_name="VRADDH",
-    )
-    unravel_vel = {r.attrs["id"]: r.VRADDH for r in unfolded_vel}
-    mt = time.time()
-    print(f"UNRAVEL done. Processing file {odim_file}.")
-    
-
-    radar = radarlist[0]
-    date = pd.Timestamp(radar.time.values[0])
-    lon = radar.attrs["longitude"]
-    lat = radar.attrs["latitude"]
-    southern_ocean = lat < -40
-
-    for radar in radarlist:
-        dataset_idx = int(radar.attrs["id"].strip("dataset"))
-
-        r = radar.range.values
-        dbz = radar.DBZH.values
-        rhohv = radar.RHOHV.values
-        zdr = radar.ZDR.values
-        phidp = radar.PHIDP.values
-        snr = radar.SNR.values
-        vraddh = unravel_vel[radar.attrs["id"]]
-
-        temps = get_temperature(date, lat, lon, radar.z.values)
-        mask = get_hydrometeor_mask(dbz, phidp, rhohv)
-
-        refl = np.ma.masked_where(mask, radar.TH.values).copy().filled(np.nan)
-        dbz_clean = speckle_filter(refl.copy(), mask) + cal_offset
-        dbz_clean = np.ma.masked_invalid(dbz_clean)
-
-        phidp = np.ma.masked_where(np.isnan(dbz_clean), radar.PHIDP)
-        phidp_corr, kdp = get_phidp(r, phidp, refl, temps)
-
-        pia = atten.correct_attenuation(r, dbz_clean, phidp_corr, temps)
-        dbz_clean2 = dbz_clean + pia
-
-        zdr_clean = correct_zdr(zdr + zdr_offset, snr)
-        zdr_clean[np.isnan(dbz_clean)] = np.nan
-
-        nw, d0 = hydro.get_dsd_estimate(dbz_clean, zdr_clean, temps)
-        snowfall = hydro.get_snowfall_estimate(dbz_clean, kdp, temps)
-        rainfall = hydro.get_rainfall_estimate(dbz_clean, zdr_clean, kdp, temps, southern_ocean)
-        scores = hydro.compute_hid(dbz_clean, zdr_clean, kdp, rhohv, temps)
-
-        h5_kwargs = {"gain": 1.0, "offset": 0.0, "nodata": -9999.0, "dtype": np.float32}
-        write_hvar_dset(hfile, dataset_idx, dbz_clean, "DBZH_CLEAN", undetect=-32.0, **h5_kwargs)
-        write_hvar_dset(hfile, dataset_idx, dbz_clean2, "DBZH_CLEAN2", undetect=-32.0, **h5_kwargs)
-        write_hvar_dset(hfile, dataset_idx, pia, "PIA", undetect=-9999.0, **h5_kwargs)
-        write_hvar_dset(hfile, dataset_idx, zdr_clean, "ZDR_CLEAN", undetect=-9999.0, **h5_kwargs)
-        write_hvar_dset(hfile, dataset_idx, vraddh, "VRADDH", undetect=-9999.0, **h5_kwargs)
-        write_hvar_dset(hfile, dataset_idx, phidp_corr, "PHIDP_PHIDO", undetect=-9999.0, **h5_kwargs)
-        write_hvar_dset(hfile, dataset_idx, kdp, "KDP_PHIDO", undetect=-9999.0, **h5_kwargs)
-        write_hvar_dset(hfile, dataset_idx, rainfall, "RAIN", undetect=-9999.0, **h5_kwargs)
-        write_hvar_dset(hfile, dataset_idx, nw, "NW", undetect=-9999.0, **h5_kwargs)
-        write_hvar_dset(hfile, dataset_idx, d0, "D0", undetect=-9999.0, **h5_kwargs)
-        write_hvar_dset(hfile, dataset_idx, snowfall, "SNOW", undetect=-9999.0, **h5_kwargs)
-        write_hvar_dset(hfile, dataset_idx, temps, "TEMPERATURE", undetect=-9999.0, **h5_kwargs)
-        write_hvar_dset(
-            hfile,
-            dataset_idx,
-            scores.astype(np.int16),
-            "HID",
-            gain=np.int16(1),
-            offset=np.int16(0),
-            undetect=np.int16(0),
-            nodata=np.int16(0),
-            dtype=np.int16,
+        unfolded_vel = unravel.unravel_3D_pyodim(
+            radarlist,                # pass the loaded data, not the path
+            vel_name=vel_name,
+            condition=condition,
+            read_write=False,         # required for the list path — it raises if True
+            output_vel_name="VRADDH",
         )
+        unravel_vel = {r.attrs["id"]: r.VRADDH for r in unfolded_vel}
+        mt = time.time()
+        print(f"UNRAVEL done. Processing file {odim_file}.")
 
-    hfile.close()
+        radar = radarlist[0]
+        date = pd.Timestamp(radar.time.values[0])
+        lon = radar.attrs["longitude"]
+        lat = radar.attrs["latitude"]
+        southern_ocean = lat < -40
+
+        for radar in radarlist:
+            dataset_idx = int(radar.attrs["id"].strip("dataset"))
+
+            r = radar.range.values
+            dbz = radar[fields["DBZH"]].values
+            rhohv = radar[fields["RHOHV"]].values
+            zdr = radar[fields["ZDR"]].values
+            phidp = radar[fields["PHIDP"]].values
+            snr = radar[fields["SNR"]].values
+            vraddh = unravel_vel[radar.attrs["id"]]
+
+            temps = get_temperature(date, lat, lon, radar.z.values)
+            mask = get_hydrometeor_mask(dbz, phidp, rhohv)
+
+            refl = np.ma.masked_where(mask, radar[fields["TH"]].values).copy().filled(np.nan)
+            dbz_clean = speckle_filter(refl.copy(), mask) + cal_offset
+            dbz_clean = np.ma.masked_invalid(dbz_clean)
+
+            phidp = np.ma.masked_where(np.isnan(dbz_clean), radar[fields["PHIDP"]])
+            phidp_corr, kdp = get_phidp(r, phidp, refl, temps)
+
+            pia = atten.correct_attenuation(r, dbz_clean, phidp_corr, temps)
+            dbz_clean2 = dbz_clean + pia
+
+            zdr_clean = correct_zdr(zdr + zdr_offset, snr)
+            zdr_clean[np.isnan(dbz_clean)] = np.nan
+
+            nw, d0 = hydro.get_dsd_estimate(dbz_clean, zdr_clean, temps)
+            snowfall = hydro.get_snowfall_estimate(dbz_clean, kdp, temps)
+            rainfall = hydro.get_rainfall_estimate(dbz_clean, zdr_clean, kdp, temps, southern_ocean)
+            scores = hydro.compute_hid(dbz_clean, zdr_clean, kdp, rhohv, temps)
+
+            h5_kwargs = {"gain": 1.0, "offset": 0.0, "nodata": -9999.0, "dtype": np.float32}
+            write_hvar_dset(hfile, dataset_idx, dbz_clean, "DBZH_CLEAN", undetect=-32.0, **h5_kwargs)
+            write_hvar_dset(hfile, dataset_idx, dbz_clean2, "DBZH_CLEAN2", undetect=-32.0, **h5_kwargs)
+            write_hvar_dset(hfile, dataset_idx, pia, "PIA", undetect=-9999.0, **h5_kwargs)
+            write_hvar_dset(hfile, dataset_idx, zdr_clean, "ZDR_CLEAN", undetect=-9999.0, **h5_kwargs)
+            write_hvar_dset(hfile, dataset_idx, vraddh, "VRADDH", undetect=-9999.0, **h5_kwargs)
+            write_hvar_dset(hfile, dataset_idx, phidp_corr, "PHIDP_PHIDO", undetect=-9999.0, **h5_kwargs)
+            write_hvar_dset(hfile, dataset_idx, kdp, "KDP_PHIDO", undetect=-9999.0, **h5_kwargs)
+            write_hvar_dset(hfile, dataset_idx, rainfall, "RAIN", undetect=-9999.0, **h5_kwargs)
+            write_hvar_dset(hfile, dataset_idx, nw, "NW", undetect=-9999.0, **h5_kwargs)
+            write_hvar_dset(hfile, dataset_idx, d0, "D0", undetect=-9999.0, **h5_kwargs)
+            write_hvar_dset(hfile, dataset_idx, snowfall, "SNOW", undetect=-9999.0, **h5_kwargs)
+            write_hvar_dset(hfile, dataset_idx, temps, "TEMPERATURE", undetect=-9999.0, **h5_kwargs)
+            write_hvar_dset(
+                hfile,
+                dataset_idx,
+                scores.astype(np.int16),
+                "HID",
+                gain=np.int16(1),
+                offset=np.int16(0),
+                undetect=np.int16(0),
+                nodata=np.int16(0),
+                dtype=np.int16,
+            )
+    finally:
+        # Always release the ODIM handle, even if processing raised partway
+        # through (e.g. UNRAVEL crash), so the file is not left open/locked.
+        hfile.close()
+
     et = time.time()
-
     print(f"{odim_file} processed in {et-st:.3f}s total (unravel: {mt-st:.3f}s).")
 
     return None
