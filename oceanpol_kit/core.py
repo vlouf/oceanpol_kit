@@ -565,7 +565,12 @@ def write_hvar_dset_hydro(hfile: h5py.File, dataset_idx: int, data: np.ndarray, 
     return None
 
 
-def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float = 0.7) -> None:
+def process_oceanpol(
+    odim_file: str,
+    cal_offset: float = 0.7,
+    zdr_offset: float = 0.7,
+    min_unravel_gates: int = 5000,
+) -> None:
     """
     Process an ODIM file to clean and correct radar data, and write the results to the file.
 
@@ -577,6 +582,12 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
         The calibration offset for reflectivity (default is 0.7).
     zdr_offset : float, optional
         The offset for differential reflectivity (default is 0.7).
+    min_unravel_gates : int, optional
+        If the number of coherent velocity gates left after noise censoring is
+        below this value, UNRAVEL is skipped and the censored velocity is passed
+        through unchanged (default 5000). The coherent-gate count is printed each
+        run; set this just above the count of your clear-air volumes to skip
+        dealiasing on near-empty scans without affecting precipitation volumes.
 
     Returns
     -------
@@ -595,10 +606,11 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
 
         condition = (sqi_name, "lower", 0.3) if sqi_name else None
 
-        # Censor incoherent (noise) velocity gates before dealiasing. UNRAVEL
-        # then only processes coherent echo: far faster on near-empty volumes
-        # and free of the random-noise artefacts it would otherwise dealias.
-        # Coherent clear-air returns (high SQI) are preserved.
+        # Censor incoherent (noise) velocity gates before dealiasing, and count
+        # the coherent echo that remains. This frees the velocity of the random
+        # noise UNRAVEL would otherwise dealias, while preserving coherent
+        # clear-air returns (high SQI, finite total power).
+        n_coherent = 0
         for sweep in radarlist:
             good_vel = get_velocity_mask(
                 sweep[vel_name].values,
@@ -606,17 +618,26 @@ def process_oceanpol(odim_file: str, cal_offset: float = 0.7, zdr_offset: float 
                 refl=sweep[fields["TH"]].values,
             )
             sweep[vel_name].values[~good_vel] = np.nan
+            n_coherent += int(np.count_nonzero(good_vel))
 
-        unfolded_vel = unravel.unravel_3D_pyodim(
-            radarlist,
-            vel_name=vel_name,
-            condition=condition,
-            read_write=False,
-            output_vel_name="VRADDH",
-        )
-        unravel_vel = {r.attrs["id"]: r.VRADDH for r in unfolded_vel}
+        if n_coherent < min_unravel_gates:
+            # Near-empty volume: UNRAVEL's runtime is mostly fixed overhead, so
+            # skip dealiasing entirely and pass the censored velocity through.
+            print(f"Skipping UNRAVEL: {n_coherent} coherent velocity gates (< {min_unravel_gates}).")
+            unravel_vel = {
+                sweep.attrs["id"]: np.asarray(sweep[vel_name].values) for sweep in radarlist
+            }
+        else:
+            unfolded_vel = unravel.unravel_3D_pyodim(
+                radarlist,
+                vel_name=vel_name,
+                condition=condition,
+                read_write=False,
+                output_vel_name="VRADDH",
+            )
+            unravel_vel = {r.attrs["id"]: r.VRADDH for r in unfolded_vel}
         mt = time.time()
-        print(f"UNRAVEL done. Processing file {odim_file}.")
+        print(f"UNRAVEL done ({n_coherent} coherent gates). Processing file {odim_file}.")
 
         radar = radarlist[0]
         date = pd.Timestamp(radar.time.values[0])
