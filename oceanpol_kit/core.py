@@ -24,7 +24,7 @@ differential reflectivity, drop size distribution, hydrometeor classification, a
 """
 
 import time
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import h5py
 import pyodim
