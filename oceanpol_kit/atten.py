@@ -92,20 +92,22 @@ def correct_attenuation(r, refl, proc_dp_phase_shift, temp):
         ray_phase_shift = proc_dp_phase_shift[i, :]
         ray_init_refl = init_refl_correct[i, :]
 
-        last_six_good = np.where(~mask[i, :])[0][-6:]
+        good = np.where(~mask[i, :])[0]
+        if good.size == 0:
+            # Whole ray masked: no valid gates, leave attenuation at zero.
+            continue
+        last_six_good = good[-6:]
         phidp_max = np.median(ray_phase_shift[last_six_good])
         sm_refl = smooth_and_trim(ray_init_refl, window_len=5)
         reflectivity_linear = 10.0 ** (0.1 * beta * sm_refl)
         reflectivity_linear[np.isnan(reflectivity_linear)] = 0
         self_cons_number = 10.0 ** (0.1 * beta * a_coef * phidp_max) - 1.0
         I_indef = cumulative_trapezoid(0.46 * beta * dr * reflectivity_linear[::-1])
-        I_indef = cumulative_trapezoid(0.46 * beta * dr * reflectivity_linear[::-1])
         I_indef = np.append(I_indef, I_indef[-1])[::-1]
 
         # set the specific attenutation and attenuation
         specific_atten[i, :] = reflectivity_linear * self_cons_number / (I_indef[0] + self_cons_number * I_indef)
 
-        atten[i, :-1] = cumulative_trapezoid(specific_atten[i, :]) * dr * 2.0
         atten[i, :-1] = cumulative_trapezoid(specific_atten[i, :]) * dr * 2.0
         atten[i, -1] = atten[i, -2]
 
