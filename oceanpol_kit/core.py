@@ -344,11 +344,8 @@ def get_precip_mask(
 
 def get_phidp(
     r: np.ndarray,
-    phidp: np.ndarray,
-    refl: np.ndarray,
-    temperature: np.ndarray,
-    precip: Optional[np.ndarray] = None,
-    window: List[int] = [3, 7],
+    azimuth: np.ndarray,
+    phidp: np.ma.MaskedArray,    
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Calculate the corrected differential phase (PHIDP) and specific
@@ -358,18 +355,10 @@ def get_phidp(
     ----------
     r : np.ndarray
         A 1D array containing the range values.
-    phidp : np.ndarray
-        A 2D array containing the differential phase values.
-    refl : np.ndarray
-        A 2D array containing the reflectivity values.
-    temperature : np.ndarray
-        A 2D array containing the temperature values.
-    precip : np.ndarray, optional
-        Boolean precipitation mask (see get_precip_mask). Where False, KDP is
-        not integrated and the outputs are set to NaN. If None, no gating is
-        applied.
-    window : List[int], optional
-        A list containing the window sizes for KDP calculation (default is [3, 7]).
+    azimuth : np.ndarray
+        A 1D array containing the azimuth values.
+    phidp : np.ma.MaskedArray
+        A 2D array containing the differential phase values.    
 
     Returns
     -------
@@ -379,7 +368,7 @@ def get_phidp(
         - kdp: A 2D array of the specific differential phase.
     """
     dr = (r[1] - r[0]) / 1000
-    daz = 1.0
+    daz = np.median(np.abs(np.diff(azimuth)))
     angles = np.sort(np.mod(phidp[~phidp.mask].ravel() + 180, 360) - 180)
     factor = 2 if np.all(abs(np.diff(angles, append=angles[0])) <= 180) else 1
 
@@ -389,20 +378,8 @@ def get_phidp(
         daz,
         factor=factor,
         complex=True
-    ).T
-    kdp[(kdp < 0) & (refl < 40) & (temperature >= 0)] = 0
-
-    if precip is not None:
-        # Restrict phase to genuine precipitation: outside it KDP is set to 0 so
-        # the cumulative integration below does not accumulate noise along the
-        # ray (the cause of the radial PHIDP streaks over clear air).
-        kdp = np.where(precip, kdp, 0.0)
-
-    phidp_corr = 2 * dr * np.cumsum(kdp, 1)
-
-    if precip is not None:
-        kdp = np.where(precip, kdp, np.nan)
-        phidp_corr = np.where(precip, phidp_corr, np.nan)
+    ).T    
+    phidp_corr = 2 * dr * np.cumsum(kdp, axis=1)
 
     return phidp_corr, kdp
 
@@ -635,6 +612,7 @@ def process_oceanpol(
             dataset_idx = int(radar.attrs["id"].strip("dataset"))
 
             r = radar.range.values
+            azimuth = radar.azimuth.values
             dbz = radar[fields["DBZH"]].values
             rhohv = radar[fields["RHOHV"]].values
             zdr = radar[fields["ZDR"]].values
@@ -655,8 +633,8 @@ def process_oceanpol(
 
             t = time.time()
             phidp = np.ma.masked_where(np.isnan(dbz_clean), radar[fields["PHIDP"]])
-            precip = get_precip_mask(rhohv, snr, np.ma.filled(dbz_clean, np.nan))
-            phidp_corr, kdp = get_phidp(r, phidp, refl, temps, precip=precip)
+            # precip = get_precip_mask(rhohv, snr, np.ma.filled(dbz_clean, np.nan))
+            phidp_corr, kdp = get_phidp(r, azimuth, phidp)
             cumtime["phidp_corr"] = cumtime.get("phidp_corr", 0) + time.time() - t
 
             t = time.time()
