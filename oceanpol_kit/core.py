@@ -581,14 +581,17 @@ def process_oceanpol(
         vel_name = fields["VRAD"]
         th_name = fields["TH"]
         rhohv_name = fields["RHOHV"]
-        sqi_name = fields["SQI"]
+        sqi_name = fields["SQI"]        
         for idx in range(len(radarlist)):
             r = radarlist[idx]
-            mask = (np.isnan(r[th_name]) | (r[th_name] < -15) | (r[rhohv_name] < 0.4) | (r[sqi_name] < 0.4))
+            mask = (np.isnan(r[th_name]) | (r[th_name] < -15) | (r[rhohv_name] < 0.4) | (r[sqi_name] < 0.4))            
             vel = r[vel_name].values.copy()
             vel[mask] = np.nan
             vel = speckle_filter(vel, mask.values, min_dbz=-60)
-            radarlist[idx] = r.merge({"VRADH_CLEAN": (("azimuth", "range"), vel)})
+            radarlist[idx] = r.merge({
+                "VRADH_CLEAN": (("azimuth", "range"), vel), 
+                "MASK": (("azimuth", "range"), mask.values.astype(np.int16))
+            })
 
         print(f"Running UNRAVEL (data loaded in {time.time() - st:.3f}s).")
         ut = time.time()
@@ -619,6 +622,7 @@ def process_oceanpol(
             phidp = radar[fields["PHIDP"]].values
             snr = radar[fields["SNR"]].values
             vraddh = unravel_vel[radar.attrs["id"]]
+            mask_unravel = radar["MASK"].values.astype(bool)
 
             t = time.time()
             temps = temperature.interp_temperature(geo_h_profile, temp_profile, radar.z.values)
@@ -632,7 +636,7 @@ def process_oceanpol(
             cumtime["dbz_clean"] = cumtime.get("dbz_clean", 0) + time.time() - t
 
             t = time.time()
-            phidp = np.ma.masked_where(np.isnan(dbz_clean), radar[fields["PHIDP"]])
+            phidp = np.ma.masked_where(np.isnan(dbz_clean) | mask_unravel, radar[fields["PHIDP"]])            
             # precip = get_precip_mask(rhohv, snr, np.ma.filled(dbz_clean, np.nan))
             phidp_corr, kdp = get_phidp(r, azimuth, phidp)
             cumtime["phidp_corr"] = cumtime.get("phidp_corr", 0) + time.time() - t
