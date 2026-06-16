@@ -345,7 +345,7 @@ def get_precip_mask(
 def get_phidp(
     r: np.ndarray,
     azimuth: np.ndarray,
-    phidp: np.ma.MaskedArray,    
+    phidp: np.ma.MaskedArray,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Calculate the corrected differential phase (PHIDP) and specific
@@ -358,7 +358,7 @@ def get_phidp(
     azimuth : np.ndarray
         A 1D array containing the azimuth values.
     phidp : np.ma.MaskedArray
-        A 2D array containing the differential phase values.    
+        A 2D array containing the differential phase values.
 
     Returns
     -------
@@ -369,7 +369,7 @@ def get_phidp(
     """
     dr = (r[1] - r[0]) / 1000
     daz = np.median(np.abs(np.diff(azimuth)))
-    angles = np.sort(np.mod(phidp[~phidp.mask].ravel() + 180, 360) - 180)
+    angles = np.sort(np.mod(phidp[~np.isnan(phidp)].ravel() + 180, 360) - 180)
     factor = 2 if np.all(abs(np.diff(angles, append=angles[0])) <= 180) else 1
 
     kdp = phidp_to_kdp_nonstationary(
@@ -378,7 +378,7 @@ def get_phidp(
         daz,
         factor=factor,
         complex=True
-    ).T    
+    ).T
     phidp_corr = 2 * dr * np.cumsum(kdp, axis=1)
 
     return phidp_corr, kdp
@@ -581,15 +581,15 @@ def process_oceanpol(
         vel_name = fields["VRAD"]
         th_name = fields["TH"]
         rhohv_name = fields["RHOHV"]
-        sqi_name = fields["SQI"]        
+        sqi_name = fields["SQI"]
         for idx in range(len(radarlist)):
             r = radarlist[idx]
-            mask = (np.isnan(r[th_name]) | (r[th_name] < -15) | (r[rhohv_name] < 0.4) | (r[sqi_name] < 0.4))            
+            mask = (np.isnan(r[th_name]) | (r[th_name] < -15) | (r[rhohv_name] < 0.4) | (r[sqi_name] < 0.4))
             vel = r[vel_name].values.copy()
             vel[mask] = np.nan
             vel = speckle_filter(vel, mask.values, min_dbz=-60)
             radarlist[idx] = r.merge({
-                "VRADH_CLEAN": (("azimuth", "range"), vel), 
+                "VRADH_CLEAN": (("azimuth", "range"), vel),
                 "MASK": (("azimuth", "range"), mask.values.astype(np.int16))
             })
 
@@ -636,7 +636,7 @@ def process_oceanpol(
             cumtime["dbz_clean"] = cumtime.get("dbz_clean", 0) + time.time() - t
 
             t = time.time()
-            phidp = np.ma.masked_where(np.isnan(dbz_clean) | mask_unravel, radar[fields["PHIDP"]])            
+            phidp = np.ma.masked_where(np.isnan(dbz_clean) | mask_unravel, radar[fields["PHIDP"]]).filled(np.nan)
             # precip = get_precip_mask(rhohv, snr, np.ma.filled(dbz_clean, np.nan))
             phidp_corr, kdp = get_phidp(r, azimuth, phidp)
             cumtime["phidp_corr"] = cumtime.get("phidp_corr", 0) + time.time() - t
