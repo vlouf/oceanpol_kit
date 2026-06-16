@@ -35,7 +35,7 @@ import pandas as pd
 import xarray as xr
 
 from numba import njit
-from phido import phidp_to_kdp
+from phido import phidp_to_kdp_nonstationary
 from . import hydro
 from . import atten
 from . import temperature
@@ -379,10 +379,17 @@ def get_phidp(
         - kdp: A 2D array of the specific differential phase.
     """
     dr = (r[1] - r[0]) / 1000
+    daz = 1.0
     angles = np.sort(np.mod(phidp[~phidp.mask].ravel() + 180, 360) - 180)
     factor = 2 if np.all(abs(np.diff(angles, append=angles[0])) <= 180) else 1
 
-    kdp = phidp_to_kdp(phidp, dr, window=window, factor=factor, complex=True)
+    kdp = phidp_to_kdp_nonstationary(
+        phidp.T,
+        r,
+        daz,
+        factor=factor,
+        complex=True
+    ).T
     kdp[(kdp < 0) & (refl < 40) & (temperature >= 0)] = 0
 
     if precip is not None:
@@ -634,7 +641,7 @@ def process_oceanpol(
             phidp = radar[fields["PHIDP"]].values
             snr = radar[fields["SNR"]].values
             vraddh = unravel_vel[radar.attrs["id"]]
-            
+
             t = time.time()
             temps = temperature.interp_temperature(geo_h_profile, temp_profile, radar.z.values)
             mask = get_hydrometeor_mask(dbz, phidp, rhohv)
