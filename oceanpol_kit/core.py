@@ -613,11 +613,12 @@ def process_oceanpol(
             radarlist[idx] = r.merge({"VRADH_CLEAN": (("azimuth", "range"), vel)})
 
         print("Running UNRAVEL.")
+        ut = time.time()
         unfolded_vel = unravel.unravel_3D_pyodim(radarlist, vel_name="VRADH_CLEAN", read_write=False, output_vel_name="VRADDH")
         unravel_vel = {r.attrs["id"]: r.VRADDH for r in unfolded_vel}
 
         mt = time.time()
-        print(f"UNRAVEL done in {mt-st:.3f}s. Processing fields and writing output.")
+        print(f"UNRAVEL done in {mt-ut:.3f}s. Processing fields and writing output.")
         radar = radarlist[0]
         date = pd.Timestamp(radar.time.values[0])
         lon = radar.attrs["longitude"]
@@ -691,6 +692,6 @@ def process_oceanpol(
         hfile.close()
 
     et = time.time()
-    print(f"{odim_file} processed in {et-st:.3f}s total (unravel: {mt-st:.3f}s).")
+    print(f"{odim_file} processed in {et-st:.3f}s total.")
 
     return None
