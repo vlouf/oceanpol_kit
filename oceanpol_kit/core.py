@@ -622,6 +622,7 @@ def process_oceanpol(
             date, lat, lon, radarlist, fields
         )
 
+        cumtime = {}
         for radar in radarlist:
             dataset_idx = int(radar.attrs["id"].strip("dataset"))
 
@@ -632,29 +633,45 @@ def process_oceanpol(
             phidp = radar[fields["PHIDP"]].values
             snr = radar[fields["SNR"]].values
             vraddh = unravel_vel[radar.attrs["id"]]
-
+            
+            t = time.time()
             temps = temperature.interp_temperature(geo_h_profile, temp_profile, radar.z.values)
             mask = get_hydrometeor_mask(dbz, phidp, rhohv)
+            cumtime["preprocessing"] = cumtime.get("preprocessing", 0) + time.time() - t
 
+            t=time.time()
             refl = np.ma.masked_where(mask, radar[fields["TH"]].values).copy().filled(np.nan)
             dbz_clean = speckle_filter(refl.copy(), mask) + cal_offset
             dbz_clean = np.ma.masked_invalid(dbz_clean)
+            cumtime["dbz_clean"] = cumtime.get("dbz_clean", 0) + time.time() - t
 
+            t = time.time()
             phidp = np.ma.masked_where(np.isnan(dbz_clean), radar[fields["PHIDP"]])
             precip = get_precip_mask(rhohv, snr, np.ma.filled(dbz_clean, np.nan))
             phidp_corr, kdp = get_phidp(r, phidp, refl, temps, precip=precip)
+            cumtime["phidp_corr"] = cumtime.get("phidp_corr", 0) + time.time() - t
 
+            t = time.time()
             pia = atten.correct_attenuation(r, dbz_clean, phidp_corr, temps)
             dbz_clean2 = dbz_clean + pia
+            cumtime["pia"] = cumtime.get("pia", 0) + time.time() - t
 
+            t = time.time()
             zdr_clean = correct_zdr(zdr + zdr_offset, snr)
             zdr_clean[np.isnan(dbz_clean)] = np.nan
+            cumtime["zdr_clean"] = cumtime.get("zdr_clean", 0) + time.time() - t
 
+            t = time.time()
             nw, d0 = hydro.get_dsd_estimate(dbz_clean, zdr_clean, temps)
             snowfall = hydro.get_snowfall_estimate(dbz_clean, kdp, temps)
             rainfall = hydro.get_rainfall_estimate(dbz_clean, zdr_clean, kdp, temps, southern_ocean)
-            scores = hydro.compute_hid(dbz_clean, zdr_clean, kdp, rhohv, temps)
+            cumtime["retrievals"] = cumtime.get("retrievals", 0) + time.time() - t
 
+            t = time.time()
+            scores = hydro.compute_hid(dbz_clean, zdr_clean, kdp, rhohv, temps)
+            cumtime["compute_hid"] = cumtime.get("compute_hid", 0) + time.time() - t
+
+            t = time.time()
             h5_kwargs = {"gain": 1.0, "offset": 0.0, "nodata": -9999.0, "dtype": np.float32}
             write_hvar_dset(hfile, dataset_idx, dbz_clean, "DBZH_CLEAN", undetect=-32.0, **h5_kwargs)
             write_hvar_dset(hfile, dataset_idx, dbz_clean2, "DBZH_CLEAN2", undetect=-32.0, **h5_kwargs)
@@ -679,11 +696,15 @@ def process_oceanpol(
                 nodata=np.int16(0),
                 dtype=np.int16,
             )
+            cumtime["writing"] = cumtime.get("writing", 0) + time.time() - t
     finally:
         # Always release the ODIM handle, even if processing failed
         hfile.close()
 
     et = time.time()
+    print("Timing breakdown:")
+    for step, t in cumtime.items():
+        print(f"  {step}: {t:.3f}s")
     print(f"{odim_file} processed in {et-st:.3f}s total.")
 
     return None
