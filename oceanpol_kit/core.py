@@ -597,9 +597,10 @@ def process_oceanpol(
         vel_name = fields["VRAD"]
         th_name = fields["TH"]
         rhohv_name = fields["RHOHV"]
+        sqi_name = fields["SQI"]
         for idx in range(len(radarlist)):
             r = radarlist[idx]
-            mask = (np.isnan(r[th_name]) | (r[th_name] < -15) | (r[rhohv_name] < 0.4))
+            mask = (np.isnan(r[th_name]) | (r[th_name] < -15) | (r[rhohv_name] < 0.4) | (r[sqi_name] < 0.4))
             vel = r[vel_name].values.copy()
             vel[mask] = np.nan
             vel = speckle_filter(vel, mask.values, min_dbz=-60)
