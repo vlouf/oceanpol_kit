@@ -6,7 +6,7 @@ differential reflectivity, drop size distribution, hydrometeor classification, a
 @author: Valentin Louf
 @email: valentin.louf@bom.gov.au
 @institution: Bureau of Meteorology
-@date: 19/03/2025
+@date: 16/06/2026
 
 .. autosummary::
     :toctree: generated/
@@ -569,7 +569,6 @@ def process_oceanpol(
     odim_file: str,
     cal_offset: float = 0.7,
     zdr_offset: float = 0.7,
-    min_unravel_gates: int = 5000,
 ) -> None:
     """
     Process an ODIM file to clean and correct radar data, and write the results to the file.
@@ -582,12 +581,6 @@ def process_oceanpol(
         The calibration offset for reflectivity (default is 0.7).
     zdr_offset : float, optional
         The offset for differential reflectivity (default is 0.7).
-    min_unravel_gates : int, optional
-        If the number of coherent velocity gates left after noise censoring is
-        below this value, UNRAVEL is skipped and the censored velocity is passed
-        through unchanged (default 5000). The coherent-gate count is printed each
-        run; set this just above the count of your clear-air volumes to skip
-        dealiasing on near-empty scans without affecting precipitation volumes.
 
     Returns
     -------
@@ -612,7 +605,7 @@ def process_oceanpol(
             vel = speckle_filter(vel, mask.values, min_dbz=-60)
             radarlist[idx] = r.merge({"VRADH_CLEAN": (("azimuth", "range"), vel)})
 
-        print("Running UNRAVEL.")
+        print(f"Running UNRAVEL (data loaded in {time.time() - st:.3f}s).")
         ut = time.time()
         unfolded_vel = unravel.unravel_3D_pyodim(radarlist, vel_name="VRADH_CLEAN", read_write=False, output_vel_name="VRADDH")
         unravel_vel = {r.attrs["id"]: r.VRADDH for r in unfolded_vel}
@@ -687,8 +680,7 @@ def process_oceanpol(
                 dtype=np.int16,
             )
     finally:
-        # Always release the ODIM handle, even if processing raised partway
-        # through (e.g. UNRAVEL crash), so the file is not left open/locked.
+        # Always release the ODIM handle, even if processing failed
         hfile.close()
 
     et = time.time()
