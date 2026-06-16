@@ -594,51 +594,30 @@ def process_oceanpol(
     None
     """
     st = time.time()
-    print("Running UNRAVEL.")
+    print("Loading data.")
     radarlist, hfile = pyodim.read_write_odim(odim_file, read_write=True, lazy_load=False)
 
     try:
-        # Resolve field names once for the whole volume (raises if a required
-        # field is missing in any sweep).
+        # # Resolve field names once for the whole volume (raises if a required
+        # # field is missing in any sweep).
         fields = resolve_fields(radarlist)
-        sqi_name = fields["SQI"]
         vel_name = fields["VRAD"]
+        th_name = fields["TH"]
+        rhohv_name = fields["RHOHV"]
+        for idx in range(len(radarlist)):
+            r = radarlist[idx]
+            mask = (np.isnan(r[th_name]) | (r[th_name] < -15) | (r[rhohv_name] < 0.4))
+            vel = r[vel_name].values.copy()
+            vel[mask] = np.nan
+            vel = speckle_filter(vel, mask.values, min_dbz=-60)
+            radarlist[idx] = r.merge({"VRADH_CLEAN": (("azimuth", "range"), vel)})
 
-        condition = (sqi_name, "lower", 0.3) if sqi_name else None
+        print("Running UNRAVEL.")
+        unfolded_vel = unravel.unravel_3D_pyodim(radarlist, vel_name="VRADH_CLEAN", read_write=False, output_vel_name="VRADDH")
+        unravel_vel = {r.attrs["id"]: r.VRADDH for r in unfolded_vel}
 
-        # Censor incoherent (noise) velocity gates before dealiasing, and count
-        # the coherent echo that remains. This frees the velocity of the random
-        # noise UNRAVEL would otherwise dealias, while preserving coherent
-        # clear-air returns (high SQI, finite total power).
-        n_coherent = 0
-        for sweep in radarlist:
-            good_vel = get_velocity_mask(
-                sweep[vel_name].values,
-                sqi=sweep[sqi_name].values if sqi_name else None,
-                refl=sweep[fields["TH"]].values,
-            )
-            sweep[vel_name].values[~good_vel] = np.nan
-            n_coherent += int(np.count_nonzero(good_vel))
-
-        if n_coherent < min_unravel_gates:
-            # Near-empty volume: UNRAVEL's runtime is mostly fixed overhead, so
-            # skip dealiasing entirely and pass the censored velocity through.
-            print(f"Skipping UNRAVEL: {n_coherent} coherent velocity gates (< {min_unravel_gates}).")
-            unravel_vel = {
-                sweep.attrs["id"]: np.asarray(sweep[vel_name].values) for sweep in radarlist
-            }
-        else:
-            unfolded_vel = unravel.unravel_3D_pyodim(
-                radarlist,
-                vel_name=vel_name,
-                condition=condition,
-                read_write=False,
-                output_vel_name="VRADDH",
-            )
-            unravel_vel = {r.attrs["id"]: r.VRADDH for r in unfolded_vel}
         mt = time.time()
-        print(f"UNRAVEL done ({n_coherent} coherent gates). Processing file {odim_file}.")
-
+        print(f"UNRAVEL done in {mt-st:.3f}s. Processing fields and writing output.")
         radar = radarlist[0]
         date = pd.Timestamp(radar.time.values[0])
         lon = radar.attrs["longitude"]

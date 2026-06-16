@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 import oceanpol_kit
+import unravel
 
 
 # =====================================================================
@@ -237,5 +238,6 @@ if __name__ == "__main__":
     parser.add_argument("-v", "--voyage", type=str, required=True, help="Voyage ID e.g. IN2023_V06")
     parser.add_argument("-j", "--ncpu", type=int, default=16, help="Number of parallel workers")
     args = parser.parse_args()
+    unravel.warmup()
 
     main(args.voyage, args.ncpu)
